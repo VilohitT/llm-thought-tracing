@@ -1,6 +1,7 @@
 from transformer_lens import HookedTransformer, utils
 import torch
 import torch.nn.functional as F
+from properties import device
 
 
 def run_logit_lens(model: HookedTransformer, prompt: str):
@@ -22,3 +23,38 @@ def run_logit_lens(model: HookedTransformer, prompt: str):
       top_k_tokens = [model.to_single_str_token(token_id) for token_id in top_k_indices]
       preds.append((layer, top_k_tokens, top_k_probs))
     return preds
+
+
+def cosine_similarity_logits(model: HookedTransformer, prompt: str):
+    import gc
+    import torch
+
+    tokenized_prompt = model.to_str_tokens(prompt)
+    grid_1 = torch.zeros(model.cfg.n_layers, len(tokenized_prompt), device)
+    grid_2 = torch.zeros(model.cfg.n_layers, len(tokenized_prompt), device)
+
+    thought_1 = model.to_single_token("Texas")
+    thought_2 = model.to_single_token("Austin")
+    thought_1_vector = model.W_E[thought_1]
+    thought_2_vector = model.W_E[thought_2]
+
+    logits, cache = model.run_with_cache(prompt)
+
+    for layer in range(model.cfg.n_layers):
+        for token_pos in range(len(tokenized_prompt)):
+            residual_l = cache["resid_post", layer][0, token_pos, :]
+            sim_thought_1 = torch.cosine_similarity(residual_l, thought_1_vector, dim=0)
+            sim_thought_2 = torch.cosine_similarity(residual_l, thought_2_vector, dim=0)
+            grid_1[layer, token_pos] = sim_thought_1.item()
+            grid_2[layer, token_pos] = sim_thought_2.item()
+
+        # Optional: empty cache layer-by-layer
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    # Cleanup after full loop
+    del logits, cache, residual_l
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    return grid_1, grid_2

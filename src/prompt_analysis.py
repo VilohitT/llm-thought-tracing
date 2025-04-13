@@ -79,3 +79,53 @@ class CircuitDiscoverer:
         
         results["component_contributions"] = contributions
         results["top_contributors"] = top_contributors
+
+    def _analyze_component_contributions(self, prompt, target_tokens, target_indices, cache, results, replacement_map, corruption_strategy == "map"):
+    """Analyze how each component contributes to target token logits."""
+
+        # Get final token position
+        final_pos = len(self.model.to_str_tokens(prompt)) - 1
+
+        # Run both clean and corrupted prompts
+        clean_logits, clean_cache = model.run_with_cache(prompt)
+        corrupt_logits, corrupt_cache = model.run_with_cache(corrupted_prompt)
+
+        # Compute effect of patching from corrupted to clean
+        patching_effects = {}
+
+        def patching_hook(activations, hook):
+            # Replace corrupted activation with clean activation
+            activations[0, final_pos, :] = clean_cache[hook.name][0, final_pos, :]
+            return activations
+        
+        for token, token_idx in zip(target_tokens, target_indices):
+            layer_effects = []
+            
+            for layer in range(model.cfg.n_layers):
+                # Compute corrupted logits with patching
+                hook_point = f"blocks.{layer}.hook_resid_post"
+                patched_logits = model.run_with_hooks(
+                    corrupted_prompt,
+                    fwd_hooks=[(hook_point, patching_hook)]
+                )
+
+                # Measure effect on target token probability
+                clean_logit = clean_logits[0, final_pos, token_idx].item()
+                corrupt_logit = corrupt_logits[0, final_pos, token_idx].item()
+                patched_logit = patched_logits[0, final_pos, token_idx].item()
+
+                # Effect is how much patching recovers the clean prediction
+                if corrupt_logit != clean_logit:  # Avoid division by zero
+                    effect = (patched_logit - corrupt_logit) / (clean_logit - corrupt_logit)
+                else:
+                    effect = 0.0
+
+                layer_effects.append((layer, effect))
+            
+            patching_effects[token] = layer_effects
+        results["causal_tracing"] = patching_effects
+                
+        # Clean up
+        del clean_cache, corrupt_cache
+        torch.cuda.empty_cache()
+        gc.collect()

@@ -80,8 +80,11 @@ class CircuitDiscoverer:
         results["component_contributions"] = contributions
         results["top_contributors"] = top_contributors
 
-    def _analyze_component_contributions(self, prompt, target_tokens, target_indices, cache, results, replacement_map, corruption_strategy == "map"):
-    """Analyze how each component contributes to target token logits."""
+    def _perform_causal_tracing(self, prompt, target_tokens, target_indices, results, replacement_map, corruption_strategy == "map"):
+    """
+        Perform causal tracing by corrupting the input and analyzing how
+        the corruption propagates through the model. (Layer-wise)
+    """
 
         # Get final token position
         final_pos = len(self.model.to_str_tokens(prompt)) - 1

@@ -40,7 +40,7 @@ class CircuitDiscoverer:
         (model.cfg.n_layers, model.cfg.n_heads, prompt_length, prompt_length),
         device=device)
         for layer in range(model.cfg.n_layers):
-        attn_scores[layer] = cache[f"blocks.{layer}.attn.hook_pattern"][0]
+          attn_scores[layer] = cache[f"blocks.{layer}.attn.hook_pattern"][0]
         
         results["attention_patterns"] = attn_scores.detach().cpu()
 
@@ -80,11 +80,11 @@ class CircuitDiscoverer:
         results["component_contributions"] = contributions
         results["top_contributors"] = top_contributors
 
-    def _perform_causal_tracing(self, prompt, target_tokens, target_indices, results, replacement_map, corruption_strategy == "map"):
-    """
-        Perform causal tracing by corrupting the input and analyzing how
-        the corruption propagates through the model. (Layer-wise)
-    """
+    def _perform_causal_tracing(self, prompt, target_tokens, target_indices, results, replacement_map, corruption_strategy = "map"):
+        """
+            Perform causal tracing by corrupting the input and analyzing how
+            the corruption propagates through the model. (Layer-wise)
+        """
 
         # Get final token position
         final_pos = len(self.model.to_str_tokens(prompt)) - 1
@@ -239,6 +239,49 @@ class CircuitDiscoverer:
                 layer_data["positions"].append(pos_data)
             
             results["layers"].append(layer_data)
+
+        results["token_tracking"] = self._track_tokens_across_layers(results, tokens_to_track=None)
+    
+        return results
+
+    def _track_tokens_across_layers(self, logit_lens_results, tokens_to_track=None):
+        """
+        Extract the probability of specific tokens across all layers and positions.
+        This helps track how concepts evolve through the network.
+        
+        Args:
+            logit_lens_results: Results from run_logit_lens_all_positions
+            tokens_to_track: List of specific tokens to track (if None, use top tokens from last layer)
+            
+        Returns:
+            Dictionary mapping tracked tokens to their probabilities across layers and positions
+        """
+        all_tokens = logit_lens_results["tokens"]
+        
+        # If no specific tokens are provided, use top tokens from last layer's last position
+        if tokens_to_track is None:
+            last_layer = logit_lens_results["layers"][-1]
+            last_pos = last_layer["positions"][-1]
+            tokens_to_track = last_pos["top_tokens"][:3]  # Track top 3 tokens by default
+        
+        # Initialize tracking dictionary
+        tracking = {token: [] for token in tokens_to_track}
+        
+        # For each token to track, extract its probability across all layers
+        for track_token in tokens_to_track:
+            # Initialize grid for this token [n_layers, n_positions]
+            grid = torch.zeros(self.n_layers, len(all_tokens))
+            
+            # Fill in probabilities where available
+            for layer_idx, layer_data in enumerate(logit_lens_results["layers"]):
+                for pos_idx, pos_data in enumerate(layer_data["positions"]):
+                    if track_token in pos_data["top_tokens"]:
+                        token_idx = pos_data["top_tokens"].index(track_token)
+                        grid[layer_idx, pos_idx] = pos_data["top_probs"][token_idx]
+            
+            tracking[track_token] = grid
+        
+        return tracking
 
 
     

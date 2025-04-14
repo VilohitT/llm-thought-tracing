@@ -1,50 +1,50 @@
 class CircuitDiscoverer:
 
-  def __init__(self, model: HookedTransformer):
-    self.model = model
-    self.n_layers = model.cfg.n_layers
-    self.n_heads = model.cfg.n_heads
-    self.d_model = model.cfg.d_model
-    self.d_mlp = model.cfg.d_mlp if hasattr(model.cfg, 'd_mlp') else 4 * model.cfg.d_model
+    def __init__(self, model: HookedTransformer):
+        self.model = model
+        self.n_layers = model.cfg.n_layers
+        self.n_heads = model.cfg.n_heads
+        self.d_model = model.cfg.d_model
+        self.d_mlp = model.cfg.d_mlp if hasattr(model.cfg, 'd_mlp') else 4 * model.cfg.d_model
 
-  def analyse_prompt(self, prompt: str, target_tokens: list, save_intermediates=True):
-    results = {
-            "prompt": prompt,
-            "target_tokens": target_tokens,
-            "tokens": self.model.to_str_tokens(prompt),
-            "token_ids": self.model.to_tokens(prompt)[0].tolist()
-        }
-    
-    print("Running model with activation caching...")
-    # model outputs and cache
-    logits, cache = self.model.run_with_cache(prompt)
-    results["logits"] = logits.detach().cpu()
-    
-    # token indices for target tokens
-    target_indices = [self.model.to_single_token(token) for token in target_tokens]
-    results["target_indices"] = target_indices
-    
-    # information from cache
-    print("Extracting attention patterns...")
-    self._extract_attention_patterns(cache, results)
+    def analyse_prompt(self, prompt: str, target_tokens: list, save_intermediates=True):
+        results = {
+                "prompt": prompt,
+                "target_tokens": target_tokens,
+                "tokens": self.model.to_str_tokens(prompt),
+                "token_ids": self.model.to_tokens(prompt)[0].tolist()
+            }
+        
+        print("Running model with activation caching...")
+        # model outputs and cache
+        logits, cache = self.model.run_with_cache(prompt)
+        results["logits"] = logits.detach().cpu()
+        
+        # token indices for target tokens
+        target_indices = [self.model.to_single_token(token) for token in target_tokens]
+        results["target_indices"] = target_indices
+        
+        # information from cache
+        print("Extracting attention patterns...")
+        self._extract_attention_patterns(cache, results)
 
-    print("Analyzing component contributions...")
-    self._analyze_component_contributions(prompt, target_tokens, target_indices, cache, results)
-    
-    #add logit lens
+        print("Analyzing component contributions...")
+        self._analyze_component_contributions(prompt, target_tokens, target_indices, cache, results)
+        
+        #add logit lens
 
-  def _extract_attention_patterns(self, cache, results):
+    def _extract_attention_patterns(self, cache, results):
 
-    seq_len = cache["blocks.0.attn.hook_pattern"].shape[2]
-    attn_scores = torch.zeros(
-    (model.cfg.n_layers, model.cfg.n_heads, prompt_length, prompt_length),
-    device=device)
-    for layer in range(model.cfg.n_layers):
-      attn_scores[layer] = cache[f"blocks.{layer}.attn.hook_pattern"][0]
-    
-    results["attention_patterns"] = attn_scores.detach().cpu()
+        seq_len = cache["blocks.0.attn.hook_pattern"].shape[2]
+        attn_scores = torch.zeros(
+        (model.cfg.n_layers, model.cfg.n_heads, prompt_length, prompt_length),
+        device=device)
+        for layer in range(model.cfg.n_layers):
+        attn_scores[layer] = cache[f"blocks.{layer}.attn.hook_pattern"][0]
+        
+        results["attention_patterns"] = attn_scores.detach().cpu()
 
-  def _analyze_component_contributions(self, prompt, target_tokens, target_indices, cache, results):
+    def _analyze_component_contributions(self, prompt, target_tokens, target_indices, cache, results):
         """Analyze how each component contributes to target token logits."""
         # Get final token position
         final_pos = len(self.model.to_str_tokens(prompt)) - 1
@@ -132,3 +132,113 @@ class CircuitDiscoverer:
         del clean_cache, corrupt_cache
         torch.cuda.empty_cache()
         gc.collect()
+
+    def _analyze_token_influence(self, prompt, target_tokens, results):         ## This function is not refined yet
+        """
+            Analyze how each input token influences the logits for the target tokens.
+        """
+        tokens = model.to_str_tokens(prompt)
+        n_tokens = len(tokens)
+
+        # For each input token, mask it and see how it affects the output
+        token_influences = {token: [] for token in target_tokens}
+
+        for mask_pos in range(n_tokens - 1):  # Don't mask the final token
+            # Replace token with a neutral token (like [PAD] or similar)
+            masked_tokens = model.to_tokens(prompt).clone()
+            masked_tokens[0, mask_pos] = model.tokenizer.encode(" ")[0]
+
+            # Run the model with the masked input
+            masked_logits = model(masked_tokens)
+
+            # Compare with normal logits for each target token
+            normal_logits, _ = model.run_with_cache(prompt)
+
+            final_pos = n_tokens - 1
+
+            for token in target_tokens:
+                token_idx = model.to_single_token(token)
+                masked_logit = masked_logits[0, final_pos, token_idx].item()
+                normal_logit = normal_logits[0, final_pos, token_idx].item()
+
+                # Influence is the difference in logits
+                influence = normal_logit - masked_logit
+                token_influences[token].append((mask_pos, tokens[mask_pos], influence))
+
+        # Sort influences by magnitude
+        for token in target_tokens:
+            token_influences[token] = sorted(
+                token_influences[token],
+                key=lambda x: abs(x[2]),
+                reverse=True
+            )
+
+        results["token_influences"] = token_influences
+
+    def run_logit_lens_all_positions(self, prompt, top_k=5, include_probs=True):
+        """
+        Run logit lens to analyze what the model "wants to predict" at every position and layer.
+        
+        This enhanced version of logit lens examines all token positions, not just the final token,
+        giving a comprehensive view of how representations evolve through the network.
+        
+        Args:
+            prompt: Text input to analyze
+            top_k: Number of top predictions to return for each position and layer
+            include_probs: Whether to include probability scores with predictions
+            
+        Returns:
+            Dictionary containing the full analysis results
+        """
+        # Run model with activation caching
+        tokens = self.model.to_tokens(prompt)
+        tokenized_prompt = self.model.to_str_tokens(prompt)
+        logits, cache = self.model.run_with_cache(prompt)
+        
+        # Initialize results structure
+        results = {
+            "tokens": tokenized_prompt,
+            "layers": [],
+        }
+        
+        # For each layer, analyze all token positions
+        for layer in range(self.n_layers):
+            layer_data = {
+                "layer_num": layer,
+                "positions": []
+            }
+            
+            # For each token position
+            for pos in range(len(tokenized_prompt)):
+                # Get residual stream at this position and layer
+                residual = cache[f"blocks.{layer}.hook_resid_post"][0, pos, :]
+                
+                # Project to get "logits" at this intermediate state
+                intermediate_logits = residual @ self.model.W_U
+                
+                # Get top-k predictions
+                if include_probs:
+                    probs = torch.softmax(intermediate_logits, dim=0)
+                    top_values, top_indices = torch.topk(probs, k=top_k)
+                    top_probs = top_values.cpu().tolist()
+                else:
+                    top_values, top_indices = torch.topk(intermediate_logits, k=top_k)
+                    top_probs = None
+                
+                # Convert token indices to strings
+                top_tokens = [self.model.to_single_str_token(idx.item()) for idx in top_indices]
+                
+                # Store position data
+                pos_data = {
+                    "position": pos,
+                    "token": tokenized_prompt[pos],
+                    "top_tokens": top_tokens,
+                    "top_probs": top_probs
+                }
+                
+                layer_data["positions"].append(pos_data)
+            
+            results["layers"].append(layer_data)
+
+
+    

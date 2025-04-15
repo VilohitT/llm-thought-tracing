@@ -89,6 +89,14 @@ class CircuitDiscoverer:
         # Get final token position
         final_pos = len(self.model.to_str_tokens(prompt)) - 1
 
+        # Create corrupted prompt based on the replacement map
+        if corruption_strategy == "map":
+            corrupted_prompt = prompt
+            for original, replacement in replacement_map.items():
+                corrupted_prompt = corrupted_prompt.replace(original, replacement)
+        else:
+            raise ValueError("Unsupported corruption strategy. Use 'map'.")
+
         # Run both clean and corrupted prompts
         clean_logits, clean_cache = model.run_with_cache(prompt)
         corrupt_logits, corrupt_cache = model.run_with_cache(corrupted_prompt)
@@ -282,6 +290,8 @@ class CircuitDiscoverer:
             tracking[track_token] = grid
         
         return tracking
+
+    
 
 
     
